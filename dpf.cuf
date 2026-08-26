@@ -1,0 +1,865 @@
+	program dpf_cuda
+!	
+! The motion of a current filament in a DPF
+! By using the MaxwellBox framework that solves
+! the Pure Hyperbollic Maxwell Equations (PHME) with the Galërkin Method.
+! (zero order version) and the Strang splitting method.
+! this version includes friction and helicity calculations
+! CUDA version CNEA 2025-2026
+!	
+	use cudafor
+	use cublas
+	use filaments
+	implicit none
+	character(len=32) 				:: inputfile, outFile, filFile, hel_File
+	character(len=32) 				:: exFile, eyFile, ezFile, PhiFile, bxFile, byFile, bzFile, PsiFile
+	character(len=32), dimension(10) :: tom_tr
+	character(len=32), dimension(10) :: tom_ax
+	real, allocatable				:: jx(:,:,:),jy(:,:,:),jz(:,:,:),rho(:,:,:)
+	real, allocatable				:: ups(:,:,:,:)
+	real							:: sum_fil_mass
+	real , allocatable  			:: ups_8_ant(:,:,:)
+	real , allocatable				:: zeta_x(:,:,:,:), zeta_y(:,:,:,:), zeta_z(:,:,:,:)
+	real , allocatable				:: zetamx(:,:,:,:), zetamy(:,:,:,:), zetamz(:,:,:,:)
+	real , allocatable 				:: L0(:,:,:,:)
+	real , dimension(8)				:: S0
+    real, allocatable				:: pr(:,:)	! printing array
+    integer 						:: max_pt, ip
+	integer , dimension(10)			:: tomo
+	integer 						:: t_c
+	real , allocatable 				:: tomo_tr(:,:,:)
+	real , allocatable 				:: tomo_ax(:,:,:)
+	real  							:: kappa, ji, Delta, Dt
+	real  							:: co, eo, muo, etao
+	integer							:: k_sheet
+	integer							:: k_sht, l_sht
+	real							:: a_sht
+	integer 						:: p
+	integer							:: r_ext, r_int, dim_i, dim_j, dim_k, dim_m
+	integer							:: dim_anode
+	integer							:: i_tplot, j_tplot, k_tplot
+	integer 						:: printeach
+	integer							:: i,j,k,m
+	integer 						:: counter
+	! helicity vars
+	real							:: x_crd, y_crd, z_crd
+	real							:: dAx, dAy,dAz, Green
+	integer							:: i_f, j_f, k_f
+	real							:: dhel, sum_dhel, hel_dens
+	real							:: Hel(10)
+
+	character(len=80)				:: label
+
+	! filament variables : 
+	! host vars :
+	character(len=32)           	:: tom_fil_00(maxfils)
+	character(len=32)           	:: tom_fil(maxfils,10)
+	real							:: f_c, Io_fil, I_filam, m_fil
+	real							:: T0, gama, p0
+	real							:: Boz,  theta
+	real							:: mdens, psi, r_fil, Io_anode, Jo_anode, J_anode
+	real 							:: x__fil, y__fil, z__fil
+	real                            :: l_max
+	integer             			:: i_fil(maxfils,0:maxnodes+1),j_fil(maxfils,0:maxnodes+1),k_fil(maxfils,0:maxnodes+1)
+	integer							:: n_fils, n_nod, sum_frag, n_seg, l_sg, c_nod, c_fil
+	real				            :: print_x(10, maxfils,0:maxnodes+1), print_y(10, maxfils,0:maxnodes+1), print_z(10, maxfils,0:maxnodes+1)
+	real			            	:: cpu_x_fil(maxfils,0:maxnodes+1), cpu_y_fil(maxfils,0:maxnodes+1), cpu_z_fil(maxfils,0:maxnodes+1) 
+	real							:: cpu_vx_fil(maxfils,maxnodes), cpu_vy_fil(maxfils,maxnodes), cpu_vz_fil(maxfils,maxnodes)
+	real            				:: cpu_Bx_fil(maxfils,maxnodes), cpu_By_fil(maxfils,maxnodes), cpu_Bz_fil(maxfils,maxnodes)
+	real                            :: D_r, len_sg
+	real							:: me, mi, kB
+	integer							:: i_s, j_s, k_s, s
+	integer             			:: cpu_s_max(maxfils,maxnodes)
+	real							:: vs
+	
+	! device vars :
+	real, device            		:: Bx_fil(maxfils,maxnodes), By_fil(maxfils,maxnodes), Bz_fil(maxfils,maxnodes)
+	real, device            		:: x_nod(maxfils,0:maxnodes+1), y_nod(maxfils,0:maxnodes+1), z_nod(maxfils,0:maxnodes+1) 
+	real, device					:: vx_fil(maxfils,maxnodes), vy_fil(maxfils,maxnodes), vz_fil(maxfils,maxnodes)
+	real, device					:: Io_d, psi_d, mdens_d, r_fil_d, Dt_d, D_d
+	real, device					:: r_ext_d, r_int_d
+	real, device					:: z_anode
+	real, device					:: vs_d
+	
+	
+	namelist/model/kappa, ji,Delta, Dt
+	namelist/filament/mdens, T0, mi, gama, psi, r_fil, Io_anode, f_c, Boz
+	namelist/control/r_ext, r_int, dim_anode, dim_k, dim_m, label
+	namelist/graph/i_tplot, j_tplot, k_tplot, printeach, tomo
+
+	co = 299792458.0		! speed of light
+	eo = 8.854E-12			! electric permitivity of vacuum
+!	PI = 3.141592653589		! π
+	muo = PI*4.0E-07		! magnetic permeability of vacuum
+	etao = sqrt(muo/eo)		! characteristic wave impedance in vacuum [Ohm]
+	me = 9.1093837E-31		! electron mass [kg]
+	kB = 1.380649E-23		! Boltzmann constant [J/K]
+	
+	call get_command_argument(1, inputfile)
+	open(unit=1, file=trim(inputfile), status='old')
+	outFile =trim(inputfile(1:index(inputfile,".in")))//"out"
+	filFile =trim(inputfile(1:index(inputfile,".in")))//"fil.out"
+	exFile =trim(inputfile(1:index(inputfile,".in")))//"Ex.out"
+	eyFile =trim(inputfile(1:index(inputfile,".in")))//"Ey.out"
+	ezFile =trim(inputfile(1:index(inputfile,".in")))//"Ez.out"
+	PhiFile =trim(inputfile(1:index(inputfile,".in")))//"Phi.out"
+	bxFile =trim(inputfile(1:index(inputfile,".in")))//"Bx.out"
+	byFile =trim(inputfile(1:index(inputfile,".in")))//"By.out"
+	bzFile =trim(inputfile(1:index(inputfile,".in")))//"Bz.out"
+	PsiFile =trim(inputfile(1:index(inputfile,".in")))//"Psi.out"
+	hel_File=trim(inputfile(1:index(inputfile,".in")))//"helicity.out"
+	do t_c = 1, 10
+		write(tom_tr(t_c),'("tom_tr",i2.2,".out")') t_c
+		write(tom_ax(t_c),'("tom_ax",i2.2,".out")') t_c
+
+	end do
+	
+	read(1,model)
+	read(1,filament)
+	read(1,control)
+	read(1,graph)
+	close(1)
+	
+
+	
+	
+
+	do c_fil = 1, maxfils
+		write(tom_fil_00(c_fil),'("fil_",i4.4,"_00.out")') c_fil	! spark filament
+		write(tom_fil(c_fil,1),'("fil_",i4.4,"_01.out")') c_fil
+		write(tom_fil(c_fil,2),'("fil_",i4.4,"_02.out")') c_fil
+		write(tom_fil(c_fil,3),'("fil_",i4.4,"_03.out")') c_fil
+		write(tom_fil(c_fil,4),'("fil_",i4.4,"_04.out")') c_fil
+		write(tom_fil(c_fil,5),'("fil_",i4.4,"_05.out")') c_fil
+		write(tom_fil(c_fil,6),'("fil_",i4.4,"_06.out")') c_fil
+		write(tom_fil(c_fil,7),'("fil_",i4.4,"_07.out")') c_fil
+		write(tom_fil(c_fil,8),'("fil_",i4.4,"_08.out")') c_fil
+		write(tom_fil(c_fil,9),'("fil_",i4.4,"_09.out")') c_fil
+		write(tom_fil(c_fil,10),'("fil_",i4.4,"_10.out")') c_fil
+
+	end do
+	dim_i = 2*r_ext+3
+	dim_j = 2*r_ext+3
+	write(*,*) label
+	write(*,'("R_i=",ES14.7,";  R_e=",ES14.7)') r_int*Delta,r_ext*Delta
+	write(*,'("L_max=",ES14.7)') dim_k*Delta
+	write(*,'("L_anode=",ES14.7)') dim_anode*Delta
+	write(*,'("Plasma Volume=",ES14.7," [m3]")') (PI*Delta**3.0)*(dim_k*r_ext**2.0-dim_anode*r_int**2.0)
+	write(*,'("dim_i=",I5,";  dim_j=",I5,";  dim_k=",I5)') dim_i,dim_j,dim_k
+	write(*,'("print each =",I12)') printeach
+	write(*,'("dim_m=",I12)') dim_m
+	write(*,'("n_fils=",I12)') maxfils
+	write(*,'("n_nod=",I12)') maxnodes
+	write(*,'("kappa=",ES14.7,";  ji=",ES14.7)') kappa, ji
+	write(*,'("psi=",ES14.7,";  r_fil=",ES14.7)') psi, r_fil
+	write(*,'("Io_anode=",ES14.7,";  Boz=",ES14.7)') Io_anode, Boz
+	max_pt = nint(real(dim_m/printeach))
+    allocate(pr(max_pt,9))
+	write (*,*) blocks, coresblock, maxfils, maxnodes
+	write(*,'("max_pt=",I12)') max_pt
+	
+	allocate(ups(1:8,dim_i,dim_j,dim_k))
+	allocate(ups_8_ant(dim_i,dim_j,dim_k))
+	allocate(zeta_x(1:8,dim_i,dim_j,dim_k))
+	allocate(zeta_y(1:8,dim_i,dim_j,dim_k))
+	allocate(zeta_z(1:8,dim_i,dim_j,dim_k))
+	allocate(zetamx(1:8,dim_i,dim_j,dim_k))
+	allocate(zetamy(1:8,dim_i,dim_j,dim_k))
+	allocate(zetamz(1:8,dim_i,dim_j,dim_k))
+	allocate(L0(1:8,dim_i,dim_j,dim_k))
+	allocate(jx(dim_i,dim_j,dim_k))
+	allocate(jy(dim_i,dim_j,dim_k))
+	allocate(jz(dim_i,dim_j,dim_k))
+	allocate(rho(dim_i,dim_j,dim_k))
+	allocate(tomo_tr(10,dim_i,dim_j))
+	allocate(tomo_ax(10,dim_i,dim_k))
+	
+	l_sg = (r_ext-r_int) / (maxnodes+1)
+	write(*,*) 'l_sg =', l_sg
+	Jo_anode = Io_anode/(PI*(Delta*r_int)**2.0)
+
+
+	ups=0.0
+	zeta_x = 0.0
+	zeta_y = 0.0
+	zeta_z = 0.0
+	zetamx = 0.0
+	zetamy = 0.0
+	zetamz = 0.0
+	L0 = 0.0
+	S0 = 0.0
+	rho = 0.0
+	jx = 0.0
+	jy = 0.0
+	jz = 0.0
+
+	Bx_fil = 0.0
+	By_fil = 0.0
+	Bz_fil = 0.0
+	x_nod = cpu_x_fil
+	y_nod = cpu_y_fil
+	z_nod = cpu_z_fil
+	vx_fil = cpu_vx_fil
+	vy_fil = cpu_vy_fil
+	vz_fil = cpu_vz_fil
+	n_fils = maxfils
+	n_nod = maxnodes
+	n_seg = n_nod + 1
+	sum_frag = n_seg*(n_seg+3)/2
+	len_sg = 0.0
+
+	write(*,*) 'Io_anode =', Io_anode
+	write(*,*) 'Jo_anode =', Jo_anode
+
+	k_sht = 15
+	l_sht = 10
+
+	a_sht = real(k_sht)/real(l_sht)
+	!	
+	! Create the 'sparks'
+	!	
+	do c_fil = 1, n_fils
+		theta = (2.0*PI*c_fil)/maxfils
+
+		open(unit = 50, file=tom_fil_00(c_fil), status='replace')
+		do c_nod = 0, n_nod+1
+			len_sg = c_nod * Delta*real(l_sht)/real(n_seg) !len_sg + (c_nod) *(Delta*(r_ext-r_int) / sum_frag)
+
+			cpu_x_fil(c_fil,c_nod) = ((Delta*r_int + len_sg )*cos(theta)+(r_ext+2)*Delta)
+			i_fil(c_fil,c_nod) = nint(cpu_x_fil(c_fil,c_nod)/Delta)
+			
+			cpu_y_fil(c_fil,c_nod) = ((Delta*r_int + len_sg )*sin(theta)+(r_ext+2)*Delta)
+			j_fil(c_fil,c_nod) = nint(cpu_y_fil(c_fil,c_nod)/Delta)
+		
+			cpu_z_fil(c_fil,c_nod) = -a_sht * len_sg + Delta * k_sht !Delta*(k_sht)-len_sg
+			k_fil(c_fil,c_nod) = nint(-a_sht * len_sg / Delta + k_sht)
+
+			! write the spark file
+			write (50,'(I5," ",3ES14.7," ")') c_nod, cpu_x_fil(c_fil,c_nod), cpu_y_fil(c_fil,c_nod), cpu_z_fil(c_fil,c_nod)
+
+		end do
+		close(50)
+		len_sg = 0.0
+
+		k_fil(c_fil,n_nod+1) = 1
+	end do
+	write (*,*) r_ext,r_int, r_ext-r_int, maxnodes+1
+	write (*,*) "len_seg=", (r_ext-r_int)* Delta / (maxnodes+1)
+	Io_fil = f_c * Io_anode / maxfils
+	p0 = T0*kB*(mdens/ (mi+me))
+	vs = sqrt(gama*p0/mdens) 
+	write(*,'("gamma =",ES14.7)') gama
+	write(*,'("To=",ES14.7," [K]")') T0
+	write(*,'("mdens=",ES14.7," [Kg/m3]")') mdens
+	write(*,'("ndens=",ES14.7," [1/m3]")') mdens/(mi+me)
+	write(*,'("p0=",ES14.7," [Pa]")') p0
+	write(*,'("vs=",ES14.7," [m/s]")') vs
+	m_fil = psi*mdens* (PI*r_fil**2.0)*(r_ext-r_int)*Delta
+	write (*,*) "m_fil = ", m_fil
+	
+    mdens_d = mdens
+	D_d =  Delta
+	Dt_d = Dt
+    r_fil_d = r_fil
+	Io_d = 0.0
+	psi_d = psi
+	r_ext_d = r_ext * Delta
+	r_int_d = r_int * Delta
+	! Main loop:
+	! You are in the MaxwellBox
+	!	
+	sum_fil_mass = 0.0
+	t_c = 1			! plot index
+	counter  = 0	! plot counter
+ 	z_anode =  dim_anode * Delta
+	vs_d = vs
+	write(*,*) 'z_sht =', k_sht*Delta 
+	write(*,*) 'r_sht =', l_sht * Delta
+	do m =1, dim_m
+		Bx_fil = cpu_Bx_fil
+		By_fil = cpu_By_fil
+		Bz_fil = cpu_Bz_fil
+		x_nod = cpu_x_fil
+		y_nod = cpu_y_fil
+		z_nod = cpu_z_fil
+		vx_fil = cpu_vx_fil
+		vy_fil = cpu_vy_fil
+		vz_fil = cpu_vz_fil
+		J_anode = Jo_anode * sin(0.5*PI*real(m)/(real(dim_m)))
+
+		I_filam = Io_fil * sin(0.5*PI*real(m)/(real(dim_m)))
+		Io_d = I_filam
+
+		!	
+		! call the Cuda kernel : Filamenbt Domain (FD)
+		call kinetic<<<blocks,coresblock>>>(mdens_d, r_fil_d, Dt_d, Bx_fil, By_fil, Bz_fil, vs_d,	&
+		&						x_nod, y_nod, z_nod, vx_fil, vy_fil, vz_fil, Io_d, psi_d, r_ext_d, r_int_d, D_d, z_anode)
+							
+		cpu_x_fil = x_nod
+		cpu_y_fil = y_nod
+		cpu_z_fil = z_nod
+		cpu_vx_fil = vx_fil
+		cpu_vy_fil = vy_fil
+		cpu_vz_fil = vz_fil
+		k_sheet = nint(cpu_z_fil(1,0)/Delta)
+					
+		do c_fil = 1, maxfils	! set all filament currents in the MaxwellBox
+
+			y__fil=cpu_y_fil(c_fil,0)/Delta
+			j_fil(c_fil,0) = nint(y__fil)
+			if(j_fil(c_fil,0).le.0) then
+				j_fil(c_fil,0) = 1
+			end if
+
+			x__fil= cpu_x_fil(c_fil,0)/Delta
+			i_fil(c_fil,0) = nint(x__fil)				
+			if(i_fil(c_fil,0).le.0) then
+				i_fil(c_fil,0) = 1
+			end if
+
+			z__fil=cpu_z_fil(c_fil,0)/Delta
+			k_fil(c_fil,0) = nint(z__fil)
+			if(k_fil(c_fil,0).le.0) then
+				k_fil(c_fil,0) = 1
+			end if
+			
+			do c_nod = 1, maxnodes
+
+				! calculate discrete vars for MaxwellBox
+				x__fil= cpu_x_fil(c_fil,c_nod)/Delta
+				i_fil(c_fil,c_nod) = nint(x__fil)				
+				if (i_fil(c_fil,c_nod).gt.dim_i) then
+					i_fil(c_fil,c_nod)=dim_i
+				else if (i_fil(c_fil,c_nod).le.0) then
+					i_fil(c_fil,c_nod)=1
+				end if
+				y__fil=cpu_y_fil(c_fil,c_nod)/Delta
+				j_fil(c_fil,c_nod) = nint(y__fil)
+				if (j_fil(c_fil,c_nod).gt.dim_j) then
+					j_fil(c_fil,c_nod)=dim_j
+				else if (j_fil(c_fil,c_nod).le.0) then
+					j_fil(c_fil,c_nod)=1
+				end if
+				z__fil=cpu_z_fil(c_fil,c_nod)/Delta
+				k_fil(c_fil,c_nod) = nint(z__fil)
+				if (k_fil(c_fil,c_nod).gt.dim_k) then
+					k_fil(c_fil,c_nod)=dim_k
+				else if (k_fil(c_fil,c_nod).le.0) then
+					k_fil(c_fil,c_nod)=1
+				end if
+
+				D_r = sqrt((cpu_x_fil(c_fil,c_nod)-cpu_x_fil(c_fil,c_nod-1))**2.0 &
+						+  (cpu_y_fil(c_fil,c_nod)-cpu_y_fil(c_fil,c_nod-1))**2.0 &
+						+  (cpu_z_fil(c_fil,c_nod)-cpu_z_fil(c_fil,c_nod-1))**2.0	)
+				l_max = D_r/Delta
+				cpu_s_max(c_fil,c_nod) = nint(l_max)
+				if (cpu_s_max(c_fil,c_nod).eq.0) then
+					cpu_s_max(c_fil,c_nod) = 1
+				end if
+
+
+				do s = 0, cpu_s_max(c_fil,c_nod)
+
+					i_s = ((i_fil(c_fil,c_nod)-i_fil(c_fil,c_nod-1)) * s/cpu_s_max(c_fil,c_nod) + i_fil(c_fil,c_nod-1)) !*
+					j_s = ((j_fil(c_fil,c_nod)-j_fil(c_fil,c_nod-1)) * s/cpu_s_max(c_fil,c_nod) + j_fil(c_fil,c_nod-1))
+					k_s = ((k_fil(c_fil,c_nod)-k_fil(c_fil,c_nod-1)) * s/cpu_s_max(c_fil,c_nod) + k_fil(c_fil,c_nod-1))
+
+					! current on filament divided area of the bin = current density of the bin			
+					jx(i_s,j_s,k_s) = etao * Io_fil * (cpu_x_fil(c_fil,c_nod)-cpu_x_fil(c_fil,c_nod-1)) /(D_r*Delta**2.0)	
+					jy(i_s,j_s,k_s) = etao * Io_fil * (cpu_y_fil(c_fil,c_nod)-cpu_y_fil(c_fil,c_nod-1)) /(D_r*Delta**2.0)
+					jz(i_s,j_s,k_s) = etao * Io_fil * (cpu_z_fil(c_fil,c_nod)-cpu_z_fil(c_fil,c_nod-1)) /(D_r*Delta**2.0)
+				end do
+			end do
+		end do
+
+		do k = 2, dim_k-1		! first source term in Strang splitting
+			do j = 2, dim_j-1
+				do i = 2, dim_i-1
+					!	
+					! You are in the MaxwellBox.
+					! The current density j and the electric charge are the source terms in the PHMEs.
+					! You can define here your currents and/or charges, if they are variables of time.
+					! jx(i,j,k)  =
+					! jy(i,j,k)  =
+					! jz(i,j,k)  =
+					! rho(i,j,k) =
+					!	
+					if ( (sqrt(real(i-r_ext-2)**2.0+real(j-r_ext-2)**2.0).le.r_int).and.(k.le.dim_anode) ) then
+						if (k.lt.k_sheet) then
+							jz(i,j,k) = etao * J_anode
+						end if
+					end if	
+					!					
+				 	! Also set magnetic field with direction z		
+					!	
+					ups(7,i,j,k) = co*Boz
+
+					S0(1) = -co * jx(i,j,k)
+					S0(2) = -co * jy(i,j,k)
+					S0(3) = -co * jz(i,j,k)
+					S0(8) = co *ji* rho(i,j,k)
+					ups_8_ant(i,j,k) = ups(8,i,j,k)
+					do p = 1, 8
+						ups(p,i,j,k) = ups(p,i,j,k) + S0(p) * 0.50*Dt
+					end do
+				end do
+			end do
+		end do
+
+		do k = 2, dim_k-1		! flux term in Strang splitting
+					do j = 2, dim_j-1
+						do i = 2, dim_i-1
+							zeta_x(1,i,j,k) = -(1/2.0)*ji*ups(1,i,j,k) + (1/2.0)*ji*ups(8,i,j,k)
+							zeta_x(2,i,j,k) = -(1/2.0)*ups(2,i,j,k) + (1/2.0)*ups(7,i,j,k)
+							zeta_x(3,i,j,k) = -(1/2.0)*ups(3,i,j,k) - (1/2.0)*ups(6,i,j,k)
+							zeta_x(4,i,j,k) = (1/2.0)*kappa*ups(5,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zeta_x(5,i,j,k) = -(1/2.0)*kappa*ups(5,i,j,k) + (1/2.0)*kappa*ups(4,i,j,k)
+							zeta_x(6,i,j,k) = -(1/2.0)*ups(6,i,j,k) - (1/2.0)*ups(3,i,j,k)
+							zeta_x(7,i,j,k) = -(1/2.0)*ups(7,i,j,k) + (1/2.0)*ups(2,i,j,k)
+							zeta_x(8,i,j,k) = (1/2.0)*ji*ups(1,i,j,k) - (1/2.0)*ji*ups(8,i,j,k)
+
+							zetamx(1,i,j,k) = -(1/2.0)*ji*ups(1,i,j,k) - (1/2.0)*ji*ups(8,i,j,k)
+							zetamx(2,i,j,k) = -(1/2.0)*ups(2,i,j,k) - (1/2.0)*ups(7,i,j,k)
+							zetamx(3,i,j,k) = -(1/2.0)*ups(3,i,j,k) + (1/2.0)*ups(6,i,j,k)
+							zetamx(4,i,j,k) = -(1/2.0)*kappa*ups(5,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zetamx(5,i,j,k) = -(1/2.0)*kappa*ups(5,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zetamx(6,i,j,k) = -(1/2.0)*ups(6,i,j,k) + (1/2.0)*ups(3,i,j,k)
+							zetamx(7,i,j,k) = -(1/2.0)*ups(7,i,j,k) - (1/2.0)*ups(2,i,j,k)
+							zetamx(8,i,j,k) = -(1/2.0)*ji*ups(1,i,j,k) - (1/2.0)*ji*ups(8,i,j,k)
+
+							zeta_y(1,i,j,k) = -(1/2.0)*ups(1,i,j,k) - (1/2.0)*ups(7,i,j,k)
+							zeta_y(2,i,j,k) = -(1/2.0)*ji*ups(2,i,j,k)+(1/2.0)*ji*ups(8,i,j,k)
+							zeta_y(3,i,j,k) = -(1/2.0)*ups(3,i,j,k) + (1/2.0)*ups(5,i,j,k)
+							zeta_y(4,i,j,k) = (1/2.0)*kappa*ups(6,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zeta_y(5,i,j,k) = -(1/2.0)*ups(5,i,j,k)+(1/2.0)*ups(3,i,j,k)
+							zeta_y(6,i,j,k) = -(1/2.0)*kappa*ups(6,i,j,k)+(1/2.0)*kappa*ups(4,i,j,k)
+							zeta_y(7,i,j,k) = -(1/2.0)*ups(7,i,j,k)-(1/2.0)*ups(1,i,j,k)
+							zeta_y(8,i,j,k) = (1/2.0)*ji*ups(2,i,j,k)-(1/2.0)*ji*ups(8,i,j,k)
+
+							zetamy(1,i,j,k) = -(1/2.0)*ups(1,i,j,k) + (1/2.0)*ups(7,i,j,k)
+							zetamy(2,i,j,k) = -(1/2.0)*ji*ups(2,i,j,k)-(1/2.0)*ji*ups(8,i,j,k)
+							zetamy(3,i,j,k) = -(1/2.0)*ups(3,i,j,k) - (1/2.0)*ups(5,i,j,k)
+							zetamy(4,i,j,k) = -(1/2.0)*kappa*ups(6,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zetamy(5,i,j,k) = -(1/2.0)*ups(5,i,j,k)-(1/2.0)*ups(3,i,j,k)
+							zetamy(6,i,j,k) = -(1/2.0)*kappa*ups(6,i,j,k)-(1/2.0)*kappa*ups(4,i,j,k)
+							zetamy(7,i,j,k) = -(1/2.0)*ups(7,i,j,k)+(1/2.0)*ups(1,i,j,k)
+							zetamy(8,i,j,k) = -(1/2.0)*ji*ups(2,i,j,k)-(1/2.0)*ji*ups(8,i,j,k)
+
+							zeta_z(1,i,j,k) = -(1/2.0)*ups(1,i,j,k) + (1/2.0)*ups(6,i,j,k)
+							zeta_z(2,i,j,k) = -(1/2.0)*ups(2,i,j,k) - (1/2.0)*ups(5,i,j,k)
+							zeta_z(3,i,j,k) = -(1/2.0)*ji*ups(3,i,j,k) + (1/2.0)*ji*ups(8,i,j,k)
+							zeta_z(4,i,j,k) = (1/2.0)*kappa*ups(7,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zeta_z(5,i,j,k) = -(1/2.0)*ups(5,i,j,k) - (1/2.0)*ups(2,i,j,k)
+							zeta_z(6,i,j,k) = -(1/2.0)*ups(6,i,j,k) + (1/2.0)* ups(1,i,j,k)
+							zeta_z(7,i,j,k) = -(1/2.0)*kappa*ups(7,i,j,k) + (1/2.0)*kappa*ups(4,i,j,k)
+							zeta_z(8,i,j,k) = (1/2.0)*ji*ups(3,i,j,k) - (1/2.0)*ji*ups(8,i,j,k)
+
+							zetamz(1,i,j,k) = -(1/2.0)*ups(1,i,j,k) - (1/2.0)*ups(6,i,j,k)
+							zetamz(2,i,j,k) = -(1/2.0)*ups(2,i,j,k) + (1/2.0)*ups(5,i,j,k)
+							zetamz(3,i,j,k) = -(1/2.0)*ji*ups(3,i,j,k) - (1/2.0)*ji*ups(8,i,j,k)
+							zetamz(4,i,j,k) = -(1/2.0)*kappa*ups(7,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zetamz(5,i,j,k) = -(1/2.0)*ups(5,i,j,k) + (1/2.0)*ups(2,i,j,k)
+							zetamz(6,i,j,k) = -(1/2.0)*ups(6,i,j,k) - (1/2.0)*ups(1,i,j,k)
+							zetamz(7,i,j,k) = -(1/2.0)*kappa*ups(7,i,j,k) - (1/2.0)*kappa*ups(4,i,j,k)
+							zetamz(8,i,j,k) = -(1/2.0)*ji*ups(3,i,j,k) - (1/2.0)*ji*ups(8,i,j,k)
+
+
+							do p = 1, 8
+								L0(p,i,j,k) =-(co/Delta)*(   &
+							&	zetamz(p,i,j,k-1)-zetamz(p,i,j,k) + zeta_z(p,i,j,k+1)-zeta_z(p,i,j,k) &
+							&+	zetamy(p,i,j-1,k)-zetamy(p,i,j,k) + zeta_y(p,i,j+1,k)-zeta_y(p,i,j,k) &
+							&+	zetamx(p,i-1,j,k)-zetamx(p,i,j,k) + zeta_x(p,i+1,j,k)-zeta_x(p,i,j,k) )
+							end do
+
+							do p = 1, 8
+									ups(p,i,j,k) = ups(p,i,j,k) + L0(p,i,j,k) * Dt
+							end do
+
+						end do
+					end do
+					! 		Boundary conditions for ghost cells
+					do j = 2, dim_j-1
+						ups(1,1,j,k) = ups(1,2,j,k)
+						ups(3,1,j,k) = - ups(3,2,j,k)
+						ups(2,1,j,k) = - ups(2,2,j,k)
+						ups(5,1,j,k) = - ups(5,2,j,k)
+						ups(6,1,j,k) = ups(6,2,j,k)
+						ups(7,1,j,k) = ups(7,2,j,k)
+						ups(4,1,j,k) = ups(4,2,j,k)
+						ups(8,1,j,k) = - ups(8,2,j,k)
+
+						ups(1,dim_i,j,k) = ups(1,dim_i-1,j,k)
+						ups(3,dim_i,j,k) = - ups(3,dim_i-1,j,k)
+						ups(2,dim_i,j,k) = - ups(2,dim_i-1,j,k)
+						ups(5,dim_i,j,k) = - ups(5,dim_i-1,j,k)
+						ups(6,dim_i,j,k) = ups(6,dim_i-1,j,k)
+						ups(7,dim_i,j,k) = ups(7,dim_i-1,j,k)
+						ups(4,dim_i,j,k) = ups(4,dim_i-1,j,k)
+						ups(8,dim_i,j,k) = - ups(8,dim_i-1,j,k)
+					enddo
+					do i = 2, dim_i-1
+						ups(1,i,1,k) = - ups(1,i,2,k)
+						ups(2,i,1,k) = ups(2,i,2,k)
+						ups(3,i,1,k) = - ups(3,i,2,k)
+						ups(5,i,1,k) = ups(5,i,2,k)
+						ups(6,i,1,k) = - ups(6,i,2,k)
+						ups(7,i,1,k) = ups(7,i,2,k)
+						ups(4,i,1,k) = ups(4,i,2,k)
+						ups(8,i,1,k) = - ups(8,i,2,k)
+
+						ups(1,i,dim_j,k) = - ups(1,i,dim_j-1,k)
+						ups(2,i,dim_j,k) = ups(2,i,dim_j-1,k)
+						ups(3,i,dim_j,k) = - ups(3,i,dim_j-1,k)
+						ups(5,i,dim_j,k) = ups(5,i,dim_j-1,k)
+						ups(6,i,dim_j,k) = - ups(6,i,dim_j-1,k)
+						ups(7,i,dim_j,k) = ups(7,i,dim_j-1,k)
+						ups(4,i,dim_j,k) =  ups(4,i,dim_j-1,k)
+						ups(8,i,dim_j,k) = - ups(8,i,dim_j-1,k)
+					enddo	! ends i-loop
+		enddo	! ends k-loop
+		do k = 2, dim_k-1		! second source term in Strang splitting
+			do j = 2, dim_j-1
+				do i = 2, dim_i-1
+					S0(1) = -co * jx(i,j,k)
+					S0(2) = -co * jy(i,j,k)
+					S0(3) = -co * jz(i,j,k)
+					S0(8) = co *ji* rho(i,j,k)
+					do p = 1, 8
+						ups(p,i,j,k) = ups(p,i,j,k) + S0(p) * 0.50*Dt
+					end do
+				end do
+			end do
+		end do
+
+	!	
+	! 		Boundary conditions for ghost cells in k=1 and k=dim_k
+	!	
+		do j = 2, dim_j-1
+			do i = 2, dim_i-1
+
+					ups(1,i,j,1) = - ups(1,i,j,2)
+					ups(2,i,j,1) = - ups(2,i,j,2)
+					ups(3,i,j,1) = ups(3,i,j,2)
+					ups(4,i,j,1) = ups(4,i,j,2)
+					ups(5,i,j,1) = ups(5,i,j,2)
+					ups(6,i,j,1) = ups(6,i,j,2)
+					ups(7,i,j,1) = - ups(7,i,j,2)
+					ups(8,i,j,1) = - ups(8,i,j,2)
+
+					ups(1,i,j,dim_k) = - ups(1,i,j,dim_k-1)
+					ups(2,i,j,dim_k) = - ups(2,i,j,dim_k-1)
+					ups(3,i,j,dim_k) = ups(3,i,j,dim_k-1)
+					ups(4,i,j,dim_k) = ups(4,i,j,dim_k-1)
+					ups(5,i,j,dim_k) = ups(5,i,j,dim_k-1)
+					ups(6,i,j,dim_k) = ups(6,i,j,dim_k-1)
+					ups(7,i,j,dim_k) = - ups(7,i,j,dim_k-1)
+					ups(8,i,j,dim_k) = - ups(8,i,j,dim_k-1)
+
+			enddo	! ends i-loop
+		enddo ! ends j-loop
+			
+		if (m.eq.tomo(t_c)) then
+				sum_dhel = 0.0
+				do k = 1, dim_k
+					do j = 1, dim_j
+						!	
+						! You are in the MaxwellBox.
+						! 
+						! Helicity calculations 
+						do i = 1, dim_i
+							! Calculate helicity contrib only if the point is not inside the conductor
+							hel_dens = 0
+							if (   (sqrt(real(i-r_ext-2)**2.0+real(j-r_ext-2)**2.0).lt.r_ext).and.				&
+								& ((sqrt(real(i-r_ext-2)**2.0+real(j-r_ext-2)**2.0).gt.r_int).or.(k.gt.dim_anode)) ) then
+								
+								do c_fil = 1, maxfils
+									do c_nod = 1, maxnodes+1
+										x_crd = ( cpu_x_fil(c_fil,c_nod)+cpu_x_fil(c_fil,c_nod-1) ) / 2.0
+										y_crd = ( cpu_y_fil(c_fil,c_nod)+cpu_y_fil(c_fil,c_nod-1) ) / 2.0
+										z_crd = ( cpu_z_fil(c_fil,c_nod)+cpu_z_fil(c_fil,c_nod-1) ) / 2.0
+										! Don't worry about the denominator being zero in the Green function:
+										! Given that filament coordinates and MaxwellBox cell discretization have different precisions,
+										! it is highly unlikely for this to happen.
+										! You must be very cursed if all three coordinates of a segment fall into exact MaxwellBox voxels.
+										Green = 0.25/(PI*sqrt( (x_crd-i*Delta)**2.0+(y_crd-j*Delta)**2.0+(z_crd-k*Delta)**2.0))
+										dAx = muo * I_filam * ( cpu_x_fil(c_fil,c_nod)-cpu_x_fil(c_fil,c_nod-1) ) * Green
+										dAy = muo * I_filam * ( cpu_y_fil(c_fil,c_nod)-cpu_y_fil(c_fil,c_nod-1) ) * Green
+										dAz = muo * I_filam * ( cpu_z_fil(c_fil,c_nod)-cpu_z_fil(c_fil,c_nod-1) ) * Green
+
+										dhel = (ups(5,i,j,k) * dAx + ups(6,i,j,k)  * dAy + ups(7,i,j,k) * dAz)/co
+										sum_dhel = sum_dhel + dhel*(Delta**3.0)
+										hel_dens = hel_dens + dhel
+									end do
+								end do
+							end if
+							if (i.eq.i_tplot) then
+								tomo_ax(t_c,j,k) = hel_dens
+							end if
+							if (k.eq.k_tplot) then
+								tomo_tr(t_c,i,j) = hel_dens
+							end if
+						end do
+						! *
+					end do
+				end do
+				Hel(t_c) = sum_dhel
+    		    do c_fil = 1, maxfils
+	    		    do c_nod = 0, maxnodes+1
+						print_x(t_c,c_fil,c_nod) = cpu_x_fil(c_fil,c_nod)
+						print_y(t_c,c_fil,c_nod) = cpu_y_fil(c_fil,c_nod)
+						print_z(t_c,c_fil,c_nod) = cpu_z_fil(c_fil,c_nod)
+					end do
+				end do
+				if(t_c.lt.10) then
+					t_c = t_c +1
+				end if
+		end if
+		if (counter.eq.printeach) then
+			sum_fil_mass = 0.0
+			do c_nod = 1, maxnodes+1
+				sum_fil_mass = sum_fil_mass + psi * mdens * (PI * r_fil**2.0)		&
+				&	* sqrt((cpu_x_fil(1,c_nod)-cpu_x_fil(1,c_nod-1))**2.0		&
+				& 		+  (cpu_y_fil(1,c_nod)-cpu_y_fil(1,c_nod-1))**2.0 		&
+				&		+  (cpu_z_fil(1,c_nod)-cpu_z_fil(1,c_nod-1))**2.0	) 
+			end do
+	        ip = int(real(m/printeach))
+			!	
+			!	Print coordinates and velocity of a point in the middle (segment 128) of the filament number 1
+			!	
+			pr(ip,1) = cpu_x_fil(1,128)
+			pr(ip,2) = cpu_y_fil(1,128)
+			pr(ip,3) = cpu_z_fil(1,128)
+			pr(ip,4) = cpu_vx_fil(1,128) 
+			pr(ip,5) = cpu_vy_fil(1,128) 
+			pr(ip,6) = cpu_vz_fil(1,128)
+			pr(ip,7) = J_anode
+			pr(ip,8) = ups(7,i_tplot, j_tplot, k_tplot)/co
+			pr(ip,9) = sum_fil_mass
+			counter = 0
+		endif
+		counter = counter + 1
+
+		do c_fil = 1, maxfils
+			do c_nod = 1, maxnodes		
+				do s = 0, cpu_s_max(c_fil,c_nod)
+					i_s = ((i_fil(c_fil,c_nod)-i_fil(c_fil,c_nod-1)) * s/cpu_s_max(c_fil,c_nod) + i_fil(c_fil,c_nod-1))
+					j_s = ((j_fil(c_fil,c_nod)-j_fil(c_fil,c_nod-1)) * s/cpu_s_max(c_fil,c_nod) + j_fil(c_fil,c_nod-1))
+					k_s = ((k_fil(c_fil,c_nod)-k_fil(c_fil,c_nod-1)) * s/cpu_s_max(c_fil,c_nod) + k_fil(c_fil,c_nod-1))
+					jx(i_s,j_s,k_s) = 0.0
+					jy(i_s,j_s,k_s) = 0.0
+					jz(i_s,j_s,k_s) = 0.0
+				end do
+				cpu_Bx_fil(c_fil,c_nod) = ups(5,i_fil(c_fil,c_nod),j_fil(c_fil,c_nod),k_fil(c_fil,c_nod))
+				cpu_By_fil(c_fil,c_nod) = ups(6,i_fil(c_fil,c_nod),j_fil(c_fil,c_nod),k_fil(c_fil,c_nod))
+				cpu_Bz_fil(c_fil,c_nod) = ups(7,i_fil(c_fil,c_nod),j_fil(c_fil,c_nod),k_fil(c_fil,c_nod))
+			end do
+
+			theta = atan2(real(j_fil(c_fil,1)-r_ext-2), real(i_fil(c_fil,1)-r_ext-2))
+			i_fil(c_fil,0) = nint(real(r_int)*cos(theta))+r_ext+2
+
+			
+		end do
+	end do	! ends time loop
+	write(*,'("Simulation completed.")')
+	!	
+	! You are in the MaxwellBox.
+	! 
+	! Print everything.
+	!	
+	write (*,*) "total z distance [m] :"
+	write (*,*) cpu_z_fil(1,0)-k_sht*Delta
+	write (*,*) cpu_z_fil(1,maxnodes+1)
+
+	write (*,*) "average z speed [m/s] :"
+	write (*,*) (cpu_z_fil(1,0)-k_sht*Delta) / (dim_m*Dt)
+	write (*,*) (cpu_z_fil(1,maxnodes+1)) / (dim_m*Dt)
+	
+	open(unit=20, file=trim(outFile), status='replace')
+	do ip = 1, max_pt-1
+		write (20,'(10ES16.7," ")') ip*printeach*Dt, pr(ip,1), pr(ip,2), &
+		&		pr(ip,3),pr(ip,4) , pr(ip,5) ,&
+		&		pr(ip,6),pr(ip,7), pr(ip,8), pr(ip,9)
+	end do
+	close(20)
+
+
+	open(unit=2, file=trim(exFile), status='replace')
+	open(unit=3, file=trim(eyFile), status='replace')
+	open(unit=4, file=trim(ezFile), status='replace')
+	open(unit=5, file=trim(PsiFile), status='replace')
+	open(unit=10, file=trim(bxFile), status='replace')
+	open(unit=11, file=trim(byFile), status='replace')
+	open(unit=12, file=trim(bzFile), status='replace')
+	open(unit=13, file=trim(PhiFile), status='replace')
+	do j = 1, dim_j
+		do k = 1, dim_k
+			write (2,'(ES14.7," ")',advance="no") ups(1,i_tplot,j,k)
+			write (3,'(ES14.7," ")',advance="no") ups(2,i_tplot,j,k)
+			write (4,'(ES14.7," ")',advance="no") ups(3,i_tplot,j,k)
+			write (5,'(ES14.7," ")',advance="no") ups(4,i_tplot,j,k)
+			write (10,'(ES14.7," ")',advance="no") ups(5,i_tplot,j,k)/co
+			write (11,'(ES14.7," ")',advance="no") ups(6,i_tplot,j,k)/co
+			write (12,'(ES14.7," ")',advance="no") ups(7,i_tplot,j,k)/co
+			write (13,'(ES14.7," ")',advance="no") ups(8,i_tplot,j,k)
+		enddo
+		write (2,*) ""
+		write (3,*) ""
+		write (4,*) ""
+		write (5,*) ""
+		write (10,*) ""
+		write (11,*) ""
+		write (12,*) ""
+		write (13,*) ""
+	enddo
+	close(2)
+	close(3)
+	close(4)
+	close(5)
+	close(10)
+	close(11)
+	close(12)
+	close(13)
+	
+	write(*,*) "Saving tomo plots..."
+	open(unit = 31, file=tom_tr(1), status='replace')
+	open(unit = 32, file=tom_tr(2), status='replace')
+	open(unit = 33, file=tom_tr(3), status='replace')
+	open(unit = 34, file=tom_tr(4), status='replace')
+	open(unit = 35, file=tom_tr(5), status='replace')
+	open(unit = 36, file=tom_tr(6), status='replace')
+	open(unit = 37, file=tom_tr(7), status='replace')
+	open(unit = 38, file=tom_tr(8), status='replace')
+	open(unit = 39, file=tom_tr(9), status='replace')
+	open(unit = 40, file=tom_tr(10), status='replace')
+		do i = 1, dim_i
+			do j = 1, dim_j
+				write (31,'(ES14.7," ")',advance="no") tomo_tr(1,i,j)
+				write (32,'(ES14.7," ")',advance="no") tomo_tr(2,i,j)
+				write (33,'(ES14.7," ")',advance="no") tomo_tr(3,i,j)
+				write (34,'(ES14.7," ")',advance="no") tomo_tr(4,i,j)
+				write (35,'(ES14.7," ")',advance="no") tomo_tr(5,i,j)
+				write (36,'(ES14.7," ")',advance="no") tomo_tr(6,i,j)
+				write (37,'(ES14.7," ")',advance="no") tomo_tr(7,i,j)
+				write (38,'(ES14.7," ")',advance="no") tomo_tr(8,i,j)
+				write (39,'(ES14.7," ")',advance="no") tomo_tr(9,i,j)
+				write (40,'(ES14.7," ")',advance="no") tomo_tr(10,i,j)
+			end do
+			write (31,*) ""
+			write (32,*) ""
+			write (33,*) ""
+			write (34,*) ""
+			write (35,*) ""
+			write (36,*) ""
+			write (37,*) ""
+			write (38,*) ""
+			write (39,*) ""
+			write (40,*) ""
+		end do
+	close(40)
+	close(39)
+	close(38)
+	close(37)
+	close(36)
+	close(35)
+	close(34)
+	close(33)
+	close(32)
+	close(31)
+
+	open(unit = 51, file=tom_ax(1), status='replace')
+	open(unit = 52, file=tom_ax(2), status='replace')
+	open(unit = 53, file=tom_ax(3), status='replace')
+	open(unit = 54, file=tom_ax(4), status='replace')
+	open(unit = 55, file=tom_ax(5), status='replace')
+	open(unit = 56, file=tom_ax(6), status='replace')
+	open(unit = 57, file=tom_ax(7), status='replace')
+	open(unit = 58, file=tom_ax(8), status='replace')
+	open(unit = 59, file=tom_ax(9), status='replace')
+	open(unit = 60, file=tom_ax(10), status='replace')
+		do j = 1, dim_j
+			do k = 1, dim_k
+				write (51,'(ES14.7," ")',advance="no") tomo_ax(1,j,k)
+				write (52,'(ES14.7," ")',advance="no") tomo_ax(2,j,k)
+				write (53,'(ES14.7," ")',advance="no") tomo_ax(3,j,k)
+				write (54,'(ES14.7," ")',advance="no") tomo_ax(4,j,k)
+				write (55,'(ES14.7," ")',advance="no") tomo_ax(5,j,k)
+				write (56,'(ES14.7," ")',advance="no") tomo_ax(6,j,k)
+				write (57,'(ES14.7," ")',advance="no") tomo_ax(7,j,k)
+				write (58,'(ES14.7," ")',advance="no") tomo_ax(8,j,k)
+				write (59,'(ES14.7," ")',advance="no") tomo_ax(9,j,k)
+				write (60,'(ES14.7," ")',advance="no") tomo_ax(10,j,k)
+			end do
+			write (51,*) ""
+			write (52,*) ""
+			write (53,*) ""
+			write (54,*) ""
+			write (55,*) ""
+			write (56,*) ""
+			write (57,*) ""
+			write (58,*) ""
+			write (59,*) ""
+			write (60,*) ""
+		end do
+	close(60)
+	close(59)
+	close(58)
+	close(57)
+	close(56)
+	close(55)
+	close(54)
+	close(53)
+	close(52)
+	close(51)
+
+
+	
+	write(*,*) "Saving filament data..."
+	
+	
+	do c_fil = 1, maxfils
+		open(unit = 61, file=tom_fil(c_fil,1), status='replace')
+		open(unit = 62, file=tom_fil(c_fil,2), status='replace')
+		open(unit = 63, file=tom_fil(c_fil,3), status='replace')
+		open(unit = 64, file=tom_fil(c_fil,4), status='replace')
+		open(unit = 65, file=tom_fil(c_fil,5), status='replace')
+		open(unit = 66, file=tom_fil(c_fil,6), status='replace')
+		open(unit = 67, file=tom_fil(c_fil,7), status='replace')
+		open(unit = 68, file=tom_fil(c_fil,8), status='replace')
+		open(unit = 69, file=tom_fil(c_fil,9), status='replace')
+		open(unit = 70, file=tom_fil(c_fil,10), status='replace')
+		do c_nod = 0, maxnodes+1
+				write (61,'(I5," ",3ES14.7," ")') c_nod, print_x(1,c_fil,c_nod), print_y(1,c_fil,c_nod), print_z(1,c_fil,c_nod)
+				write (62,'(I5," ",3ES14.7," ")') c_nod, print_x(2,c_fil,c_nod), print_y(2,c_fil,c_nod), print_z(2,c_fil,c_nod)
+				write (63,'(I5," ",3ES14.7," ")') c_nod, print_x(3,c_fil,c_nod), print_y(3,c_fil,c_nod), print_z(3,c_fil,c_nod)
+				write (64,'(I5," ",3ES14.7," ")') c_nod, print_x(4,c_fil,c_nod), print_y(4,c_fil,c_nod), print_z(4,c_fil,c_nod)
+				write (65,'(I5," ",3ES14.7," ")') c_nod, print_x(5,c_fil,c_nod), print_y(5,c_fil,c_nod), print_z(5,c_fil,c_nod)
+				write (66,'(I5," ",3ES14.7," ")') c_nod, print_x(6,c_fil,c_nod), print_y(6,c_fil,c_nod), print_z(6,c_fil,c_nod)
+				write (67,'(I5," ",3ES14.7," ")') c_nod, print_x(7,c_fil,c_nod), print_y(7,c_fil,c_nod), print_z(7,c_fil,c_nod)
+				write (68,'(I5," ",3ES14.7," ")') c_nod, print_x(8,c_fil,c_nod), print_y(8,c_fil,c_nod), print_z(8,c_fil,c_nod)
+				write (69,'(I5," ",3ES14.7," ")') c_nod, print_x(9,c_fil,c_nod), print_y(9,c_fil,c_nod), print_z(9,c_fil,c_nod)
+				write (70,'(I5," ",3ES14.7," ")') c_nod, print_x(10,c_fil,c_nod), print_y(10,c_fil,c_nod), print_z(10,c_fil,c_nod)
+		end do
+		close(70)
+		close(69)
+		close(68)
+		close(67)
+		close(66)
+		close(65)
+		close(64)
+		close(63)
+		close(62)
+		close(61)
+	end do
+
+	write(*,*) "Saving helicity..."
+	open(unit = 77, file=hel_File, status='replace')
+	do  t_c =1, 10
+		write (77,'(2ES16.7," ")') tomo(t_c)*Dt, Hel(t_c)
+		write (*,*) tomo(t_c)*Dt, Hel(t_c)
+	end do
+	close(77)
+	write (*,*) "done."	
+	end program
+
+
+

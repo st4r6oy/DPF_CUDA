@@ -1,0 +1,141 @@
+	module filaments
+!	
+! The Filament Domain (FD)
+! Calculates the motion of a filament in a MaxwellBox DPF
+! CUDA KERNEL for kinetic calculations
+! this version includes friction and helicity calculations
+! CNEA 2026
+!	
+	use cudafor
+	use config
+
+	contains
+	attributes(global) subroutine kinetic(mdens_d, r_fil_d, Dt_d, Bx_fil, By_fil, Bz_fil, vs_d, x_nod, y_nod, z_nod, &
+	&										vx_fil, vy_fil, vz_fil, Io_d, psi_d, r_ext_d, r_int_d, D_d, z_anode)
+			real				:: Io_d, psi_d, mdens_d, r_fil_d, Dt_d	
+			real				:: Bx_fil(maxfils,maxnodes), By_fil(maxfils,maxnodes), Bz_fil(maxfils,maxnodes)
+			real				:: vs_d
+			real				:: x_nod(maxfils,0:maxnodes+1), y_nod(maxfils,0:maxnodes+1), z_nod(maxfils,0:maxnodes+1)
+			real				:: x_fil(maxnodes+1), y_fil(maxnodes+1), z_fil(maxnodes+1)
+			real				:: vx_fil(maxfils,maxnodes), vy_fil(maxfils,maxnodes), vz_fil(maxfils,maxnodes)
+			real				:: ax_fil, ay_fil, az_fil
+			real				:: r_ext_d, r_int_d, D_d, z_anode
+			real				:: Mach, cv, Dlvmod
+			real				:: Delta_x, Delta_y, Delta_z
+			real				:: Delta_r
+			real				:: m_fil_d
+			real				:: theta
+
+			integer				:: c_nod_d, c_fil_d
+
+	!			
+	! You are in the FD
+	!	
+	c_fil_d = blockDim%x*(blockIdx%x-1)+threadIdx%x
+			
+	do c_nod_d = 1, maxnodes
+		!	
+		! select drag coefficient according tho the speed
+		Mach = sqrt(vx_fil(c_fil_d,c_nod_d)**2.0+vy_fil(c_fil_d,c_nod_d)**2.0+vz_fil(c_fil_d,c_nod_d)**2.0)/vs_d
+		if (Mach.lt.0.95) then
+			cv = 1.0	! subsonic
+		else if ((0.95.le.Mach).and.(Mach.le.1.05)) then
+			cv = 2.0	! transient
+		else
+			cv = 1.3	! supersonic
+		end if
+
+		Delta_x = (x_nod(c_fil_d,c_nod_d)-x_nod(c_fil_d,c_nod_d-1))
+		Delta_y = (y_nod(c_fil_d,c_nod_d)-y_nod(c_fil_d,c_nod_d-1))
+		Delta_z = (z_nod(c_fil_d,c_nod_d)-z_nod(c_fil_d,c_nod_d-1))
+
+		Dlvmod =  sqrt((vz_fil(c_fil_d,c_nod_d)*Delta_y - vy_fil(c_fil_d,c_nod_d)*Delta_z)**2.0 &
+					+  (vx_fil(c_fil_d,c_nod_d)*Delta_z - vz_fil(c_fil_d,c_nod_d)*Delta_x)**2.0 &
+					+  (vy_fil(c_fil_d,c_nod_d)*Delta_x - vx_fil(c_fil_d,c_nod_d)*Delta_y)**2.0)
+
+		Delta_r = sqrt(Delta_x**2.0 + Delta_y**2.0 + Delta_z**2.0)
+
+					
+		m_fil_d = psi_d*mdens_d* (PI*r_fil_d**2.0)*Delta_r
+		ax_fil = Io_d*( Delta_y * Bz_fil(c_fil_d,c_nod_d)  &
+		&			   -Delta_z * By_fil(c_fil_d,c_nod_d)  )/(co_d*m_fil_d)		&
+		&		- cv * r_fil_d *mdens_d* Dlvmod * vx_fil(c_fil_d,c_nod_d)/m_fil_d
+
+		ay_fil = Io_d*( Delta_z * Bx_fil(c_fil_d,c_nod_d)  &
+		&			   -Delta_x * Bz_fil(c_fil_d,c_nod_d)  )/(co_d*m_fil_d)		&
+		&		- cv * r_fil_d *mdens_d* Dlvmod * vy_fil(c_fil_d,c_nod_d)/m_fil_d
+
+		az_fil = Io_d*( Delta_x * By_fil(c_fil_d,c_nod_d)  &
+		&			   -Delta_y * Bx_fil(c_fil_d,c_nod_d)  )/(co_d*m_fil_d)		&
+		&		- cv * r_fil_d *mdens_d* Dlvmod * vz_fil(c_fil_d,c_nod_d)/m_fil_d
+
+
+
+		x_fil(c_nod_d) = 0.5 * (x_nod(c_fil_d,c_nod_d) + x_nod(c_fil_d,c_nod_d-1))
+		y_fil(c_nod_d) = 0.5 * (y_nod(c_fil_d,c_nod_d) + y_nod(c_fil_d,c_nod_d-1))
+		z_fil(c_nod_d) = 0.5 * (z_nod(c_fil_d,c_nod_d) + z_nod(c_fil_d,c_nod_d-1))
+
+		x_fil(c_nod_d) = (ax_fil * (Dt_d)**2.0)/(2.0) + vx_fil(c_fil_d,c_nod_D) * Dt_d + x_fil(c_nod_d)
+		vx_fil(c_fil_d,c_nod_d) = ax_fil * Dt_d + vx_fil(c_fil_d,c_nod_d)
+
+		y_fil(c_nod_d) = (ay_fil * (Dt_d)**2.0)/(2.0) + vy_fil(c_fil_d,c_nod_d) * Dt_d + y_fil(c_nod_d)
+		vy_fil(c_fil_d,c_nod_d) = ay_fil * Dt_d + vy_fil(c_fil_d,c_nod_d)
+
+		z_fil(c_nod_d) = (az_fil * (Dt_d)**2.0)/(2.0) + vz_fil(c_fil_d,c_nod_d) * Dt_d + z_fil(c_nod_d)
+		vz_fil(c_fil_d,c_nod_d) = az_fil * Dt_d + vz_fil(c_fil_d,c_nod_d)
+	end do
+	x_fil(maxnodes+1) = 0.5 * (x_nod(c_fil_d,maxnodes+1) + x_nod(c_fil_d,maxnodes))
+	y_fil(maxnodes+1) = 0.5 * (y_nod(c_fil_d,maxnodes+1) + y_nod(c_fil_d,maxnodes))
+	z_fil(maxnodes+1) = 0.5 * (z_nod(c_fil_d,maxnodes+1) + z_nod(c_fil_d,maxnodes))
+	
+
+	do c_nod_d = 1, maxnodes
+		x_nod(c_fil_d,c_nod_d) = 0.5 * (x_fil(c_nod_d+1) + x_fil(c_nod_d))
+		y_nod(c_fil_d,c_nod_d) = 0.5 * (y_fil(c_nod_d+1) + y_fil(c_nod_d))
+		z_nod(c_fil_d,c_nod_d) = 0.5 * (z_fil(c_nod_d+1) + z_fil(c_nod_d))
+		
+
+
+		if(sqrt((x_nod(c_fil_d,c_nod_d)-r_ext_d-2.0*D_d)**2.0+(y_nod(c_fil_d,c_nod_d)-r_ext_d-2.0*D_d)**2.0).lt.r_int_d ) then
+			if (z_nod(c_fil_d,c_nod_d).le.z_anode) then
+				theta = atan2( (y_nod(c_fil_d,c_nod_d)-r_ext_d-2.0*D_d), (x_nod(c_fil_d,c_nod_d)-r_ext_d-2.0*D_d))
+				x_nod(c_fil_d,c_nod_d) = r_int_d * cos(theta) + r_ext_d + 2.0*D_d
+				y_nod(c_fil_d,c_nod_d) = r_int_d * sin(theta) + r_ext_d + 2.0*D_d
+			end if
+		else if(sqrt((x_nod(c_fil_d,c_nod_d)-r_ext_d-2*D_d)**2.0+(y_nod(c_fil_d,c_nod_d)-r_ext_d-2*D_d)**2.0).gt.r_ext_d)then
+			theta = atan2( (y_nod(c_fil_d,c_nod_d)-r_ext_d-2.0*D_d), (x_nod(c_fil_d,c_nod_d)-r_ext_d-2.0*D_d))
+			x_nod(c_fil_d,c_nod_d) = r_ext_d * cos(theta) + r_ext_d + 2.0*D_d
+			y_nod(c_fil_d,c_nod_d) = r_ext_d * sin(theta) + r_ext_d + 2.0*D_d
+		end if
+	end do
+
+
+
+	if (z_nod(c_fil_d,1).le.z_anode) then
+		z_nod(c_fil_d,0) = z_nod(c_fil_d,1)
+	else
+		z_nod(c_fil_d,0) = z_anode
+	end if
+	if(sqrt((x_nod(c_fil_d,1)-r_ext_d-2.0*D_d)**2.0+(y_nod(c_fil_d,1)-r_ext_d-2.0*D_d)**2.0).lt.r_int_d ) then
+	    x_nod(c_fil_d,0) = x_nod(c_fil_d,1)
+	    y_nod(c_fil_d,0) = y_nod(c_fil_d,1)
+	end if
+
+	if(sqrt((x_nod(c_fil_d,maxnodes)-r_ext_d-2.0*D_d)**2.0+(y_nod(c_fil_d,maxnodes)-r_ext_d-2.0*D_d)**2.0) &
+			& .lt.(r_ext_d-2*D_d))then
+
+		x_nod(c_fil_d,maxnodes+1) = x_nod(c_fil_d,maxnodes)
+		y_nod(c_fil_d,maxnodes+1) = y_nod(c_fil_d,maxnodes)
+	else
+		theta = atan2( (y_nod(c_fil_d,maxnodes)-r_ext_d-2.0*D_d), (x_nod(c_fil_d,maxnodes)-r_ext_d-2.0*D_d))
+		x_nod(c_fil_d,maxnodes+1) = r_ext_d * cos(theta) + r_ext_d + 2.0*D_d
+		y_nod(c_fil_d,maxnodes+1) = r_ext_d * sin(theta) + r_ext_d + 2.0*D_d
+		z_nod(c_fil_d,maxnodes+1) = z_nod(c_fil_d,maxnodes)
+	end if
+
+
+
+
+		end subroutine kinetic
+	end module filaments
+	! end FD

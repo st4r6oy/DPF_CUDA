@@ -1,0 +1,43 @@
+ &model
+	kappa=2.0,
+	ji=2.0,
+	Delta=0.0005,
+	Dt = 1.0E-14
+	/
+ &filament
+ 	mdens =1.000E-04,
+	T0 = 300,
+	mi = 1.6726E-27,
+	gama = 1.6,
+	psi = 2.0,
+	r_fil=0.00005,
+	Io_anode = 100000000.0,
+	f_c = 0.7,
+	Boz = 1.0
+	/
+ &control
+ 	r_ext=50,
+	r_int=28,
+	dim_anode=20,
+	dim_k=100,
+	dim_m=10000,
+	label='test on filament model'
+	/
+ &graph
+ 	i_tplot = 52,
+ 	j_tplot = 52,
+ 	k_tplot = 6,
+	printeach = 10,
+	tomo(1) = 1000,
+	tomo(2) = 3000,
+	tomo(3) = 4000,
+	tomo(4) = 5000,
+	tomo(5) = 7000,
+	tomo(6) = 8000,
+	tomo(7) = 8500,
+	tomo(8) = 9000,
+	tomo(9) = 9500,
+	tomo(10)= 9900
+	/
+
+

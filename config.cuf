@@ -1,0 +1,5 @@
+	module config
+	use cudafor
+	integer, parameter 			:: blocks =3, coresblock = 128, maxfils = 384, maxnodes = 256 ! Quadro P600
+	real, parameter				:: co_d = 299792458.0, PI =  3.141592653589
+	end module config
