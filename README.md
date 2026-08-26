@@ -35,7 +35,7 @@ In addition GNUplot is required for the graphics.
 
 * CONFIGURATION
 
-	Set the configuration values of you GPU in the 'config.cuf' file.
+	Set the configuration values of your GPU in the 'config.cuf' file.
 	You will need to set these values according to you GPU model.
 	For the filament code is convenient to use one SM for each block, so 'blocks' is the SM count;
 	and 'coresblock' will be the mumber of cores by each SM.
