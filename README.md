@@ -10,6 +10,8 @@ This version includes friction and helicity calculations
 
 For NVIDIA CUDA ForTran by Jorge A. García Gallardo, CNEA (c) 2025-2026, jorge.gallardo@cab.cnea.gov.ar 
 
+* NOTE
+ 	CUDA™ is a registered trademark of NVIDIA® Corporation.
 
 Files included in this distribution:
 
@@ -27,7 +29,7 @@ Files included in this distribution:
 
 * SYSTEM REQUIREMENTS
 
-This code requires GNU/fortran and associated libraries to be installed in the system.
+This code requires NVIDIA CUDA fortran and associated libraries to be installed in the system.
 In addition GNUplot is required for the graphics.
 
 * CONFIGURATION
