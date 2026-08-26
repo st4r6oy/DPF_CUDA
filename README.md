@@ -16,6 +16,13 @@ Files included in this distribution:
 	dpf.cuf			: The MaxwellBox
 	config.cuf		: The hardware-based configuration file for the GPU
 	filaments.cuf	: The FD
+	makefile		: the makefile
+	test.in			: input example file
+	test.plt		: to plot the time-varying variables
+	plot.plt		: to plot the electromagnetic fields at the end of the run
+	evol.plt		: to plot the evolution in time of a filament
+	fil.plt			: to create a 3D plot of the sheath made of all the filaments
+	tom.plt			: to plot the "tomographic" views of MaxwellBox fields. Used here for the helicity densities.
 
 
 * SYSTEM REQUIREMENTS
