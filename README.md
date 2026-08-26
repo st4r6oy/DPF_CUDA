@@ -3,7 +3,7 @@ DPF filament model CUDA Version
 
 * INTRODUCTION
 
-The DPF code for solving the motion equations of a set of current filaments in a DPF by using the MaxwellBox framework,
+The DPF code for solving the motion equations of a set of current filaments in a Dense Plasma Focus (DPF) by using the MaxwellBox framework,
 that solves the Pure Hyperbollic Maxwell Equations (PHME) with the Galërkin Method (zero order version) and the Strang splitting method.
 
 This version includes friction and helicity calculations
