@@ -16,9 +16,9 @@ For NVIDIA CUDA ForTran by Jorge A. García Gallardo, CNEA (c) 2025-2026, jorge.
 
 Files included in this distribution:
 
-	dpf.cuf			: The MaxwellBox
-	config.cuf		: The hardware-based configuration file for the GPU
-	filaments.cuf	: The FD
+	dpf.cuf			: The MaxwellBox Cuda Fortran source code.
+	config.cuf		: The hardware-based configuration file for the GPU, Cuda Fortran source code
+	filaments.cuf	: The FD Cuda Fortran source code.
 	makefile		: the makefile
 	test.in			: input example file
 	test.plt		: to plot the time-varying variables
